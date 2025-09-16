@@ -1,0 +1,22 @@
+{
+  "name": "assignment3-complex-db",
+  "version": "1.0.0",
+  "description": "Complex Database Query Engine (MySQL version)",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js",
+    "init": "node app.js init",
+    "cross": "node app.js cross",
+    "rich": "node app.js rich",
+    "top": "node app.js top",
+    "order": "node app.js order",
+    "export": "node app.js export"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "mysql2": "^3.14.5"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}
