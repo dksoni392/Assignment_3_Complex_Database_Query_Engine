@@ -24,7 +24,12 @@ module.exports = pool;
 // ----------------- Queries / Functions -----------------
 
 // 1️ Cross join with optional filter
-async function crossJoinUsersProducts(filter = '', limit = 20, offset = 0) {
+
+async function crossJoinUsersProducts(filter = '', page = 1, pageSize = 10) {
+  const offset = (page - 1) * pageSize;
+  const limit = pageSize;
+
+  // Query for paginated data
   const sql = `
     SELECT u.name AS user_name, p.name AS product_name, p.price
     FROM users u
@@ -33,46 +38,132 @@ async function crossJoinUsersProducts(filter = '', limit = 20, offset = 0) {
     LIMIT ? OFFSET ?;
   `;
   const [rows] = await pool.query(sql, [limit, offset]);
-  return rows;
+
+  // Query for total count (no pagination)
+  const countSql = `
+    SELECT COUNT(*) AS total
+    FROM users u
+    CROSS JOIN products p
+    ${filter ? `WHERE ${filter}` : ''};
+  `;
+  const [countResult] = await pool.query(countSql);
+  const totalRecords = countResult[0].total;
+
+  return {
+    data: rows,
+    metadata: {
+      totalRecords,
+      totalPages: Math.ceil(totalRecords / pageSize),
+      currentPage: page,   // <-- directly from params
+      pageSize
+    }
+  };
 }
 
+
 // 2️ Users with total order value > $1000
-async function usersAbove1000() {
-  const [rows] = await pool.query(`
+async function usersAbove1000(page = 1, pageSize = 10) {
+  const offset = (page - 1) * pageSize;
+  const limit = pageSize;
+
+  // Query with pagination built-in
+  const sql = `
     SELECT u.name AS user_name, SUM(o.quantity * p.price) AS total_spent
     FROM users u
     JOIN orders o ON u.id = o.user_id
     JOIN products p ON o.product_id = p.id
     GROUP BY u.id
-    HAVING total_spent > 1000;
-  `);
-  return rows;
+    HAVING total_spent > 1000
+    LIMIT ? OFFSET ?;
+  `;
+  const [rows] = await pool.query(sql, [limit, offset]);
+
+  // Count total qualifying users (without pagination)
+  // ✅ Instead of doing another full query, reuse the same aggregation logic but just count
+  const countSql = `
+    SELECT COUNT(*) AS total
+    FROM (
+      SELECT u.id
+      FROM users u
+      JOIN orders o ON u.id = o.user_id
+      JOIN products p ON o.product_id = p.id
+      GROUP BY u.id
+      HAVING SUM(o.quantity * p.price) > 1000
+    ) AS subquery;
+  `;
+  const [countResult] = await pool.query(countSql);
+  const totalRecords = countResult[0].total;
+
+  return {
+    data: rows,
+    metadata: {
+      totalRecords,
+      totalPages: Math.ceil(totalRecords / pageSize),
+      currentPage: page,
+      pageSize
+    }
+  };
 }
 
-// 3️ Top-selling product per user
-async function topProductPerUser() {
-  const [rows] = await pool.query(`
-    SELECT u.name AS user_name, p.name AS top_product, MAX(total_qty) AS total_qty
+
+// 3️ Top-selling product per user (unique)
+async function topProductPerUser(page = 1, pageSize = 10) {
+  const offset = (page - 1) * pageSize;
+
+  const sql = `
+    SELECT u.name AS user_name, p.name AS top_product, t.total_qty, t.total_value
     FROM (
-        SELECT o.user_id, o.product_id, SUM(o.quantity) AS total_qty
+        SELECT 
+            o.user_id,
+            o.product_id,
+            SUM(o.quantity) AS total_qty,
+            SUM(o.quantity * p.price) AS total_value,
+            ROW_NUMBER() OVER (
+                PARTITION BY o.user_id
+                ORDER BY SUM(o.quantity) DESC, SUM(o.quantity * p.price) DESC, o.product_id ASC
+            ) AS rn
         FROM orders o
+        JOIN products p ON p.id = o.product_id
         GROUP BY o.user_id, o.product_id
-    ) AS user_product_totals
-    JOIN users u ON u.id = user_product_totals.user_id
-    JOIN products p ON p.id = user_product_totals.product_id
-    WHERE (user_product_totals.user_id, user_product_totals.total_qty) IN (
-        SELECT user_id, MAX(total_qty)
-        FROM (
-            SELECT o2.user_id, o2.product_id, SUM(o2.quantity) AS total_qty
-            FROM orders o2
-            GROUP BY o2.user_id, o2.product_id
-        ) AS sub_totals
-        GROUP BY user_id
-    )
-    GROUP BY u.id, p.id;
-  `);
-  return rows;
+    ) AS t
+    JOIN users u ON u.id = t.user_id
+    JOIN products p ON p.id = t.product_id
+    WHERE t.rn = 1
+    LIMIT ? OFFSET ?;
+  `;
+
+  const [rows] = await pool.query(sql, [pageSize, offset]);
+
+  // Get total number of unique users (only once)
+  const countSql = `
+    SELECT COUNT(*) AS total
+    FROM (
+        SELECT o.user_id,
+               ROW_NUMBER() OVER (
+                   PARTITION BY o.user_id
+                   ORDER BY SUM(o.quantity) DESC, SUM(o.quantity * p.price) DESC, o.product_id ASC
+               ) AS rn
+        FROM orders o
+        JOIN products p ON p.id = o.product_id
+        GROUP BY o.user_id, o.product_id
+    ) t
+    WHERE t.rn = 1;
+  `;
+  const [countResult] = await pool.query(countSql);
+  const totalRecords = countResult[0].total;
+
+  return {
+    data: rows,
+    metadata: {
+      totalRecords,
+      totalPages: Math.ceil(totalRecords / pageSize),
+      currentPage: page,
+      pageSize
+    }
+  };
 }
+
+
 
 // 4️ Place order transaction (prepared statement)
 async function placeOrder(userId, productId, qty) {
@@ -108,40 +199,94 @@ async function placeOrder(userId, productId, qty) {
 }
 
 // 5️ Pagination for users
-async function listUsers(page = 1, pageSize = 5) {
+async function listUsers(page = 1, pageSize = 10) {
   const offset = (page - 1) * pageSize;
+
   const [rows] = await pool.query(
     `SELECT * FROM users LIMIT ? OFFSET ?`,
     [pageSize, offset]
   );
-  return rows;
+
+  const [countResult] = await pool.query(`SELECT COUNT(*) AS total FROM users`);
+  const totalRecords = countResult[0].total;
+
+  return {
+    data: rows,
+    metadata: {
+      totalRecords,
+      totalPages: Math.ceil(totalRecords / pageSize),
+      currentPage: page,
+      pageSize
+    }
+  };
 }
+
 // 6 Pagination for products
-async function listProducts(page = 1, pageSize = 5) {
+async function listProducts(page = 1, pageSize = 10) {
   const offset = (page - 1) * pageSize;
+
   const [rows] = await pool.query(
     `SELECT * FROM products LIMIT ? OFFSET ?`,
     [pageSize, offset]
   );
-  return rows;
+
+  const [countResult] = await pool.query(`SELECT COUNT(*) AS total FROM products`);
+  const totalRecords = countResult[0].total;
+
+  return {
+    data: rows,
+    metadata: {
+      totalRecords,
+      totalPages: Math.ceil(totalRecords / pageSize),
+      currentPage: page,
+      pageSize
+    }
+  };
 }
 
 // 7 Pagination for orders
-async function listOrders(page = 1, pageSize = 5) {
+async function listOrders(page = 1, pageSize = 10) {
   const offset = (page - 1) * pageSize;
+
   const [rows] = await pool.query(
     `SELECT * FROM orders LIMIT ? OFFSET ?`,
     [pageSize, offset]
   );
-  return rows;
+
+  const [countResult] = await pool.query(`SELECT COUNT(*) AS total FROM orders`);
+  const totalRecords = countResult[0].total;
+
+  return {
+    data: rows,
+    metadata: {
+      totalRecords,
+      totalPages: Math.ceil(totalRecords / pageSize),
+      currentPage: page,
+      pageSize
+    }
+  };
 }
 
+
 // 6️ Export users to CSV
-async function exportUsersToCSV() {
-  const [rows] = await pool.query(`SELECT * FROM users`);
-  const csv = rows.map(r => Object.values(r).join(",")).join("\n");
-  fs.writeFileSync("users.csv", csv);
-  return "Exported users.csv successfully";
+async function exportTableToCSV(tableName) {
+  const [rows] = await pool.query(`SELECT * FROM ${tableName}`);
+  if (rows.length === 0) {
+    return { file: null, count: 0, message: `${tableName} table is empty` };
+  }
+
+  const headers = Object.keys(rows[0]).join(",");
+  const csvRows = rows.map(r => Object.values(r).join(","));
+  const csv = [headers, ...csvRows].join("\n");
+
+  const fileName = `${tableName}.csv`;
+  fs.writeFileSync(fileName, csv);
+
+  return {
+    file: fileName,
+    count: rows.length,
+    message: `Exported ${rows.length} rows from ${tableName} table to ${fileName}`
+  };
 }
 
 // 7 List of tables
@@ -167,20 +312,22 @@ async function showTables() {
 
 // Cross join endpoint
 app.get('/cross', async (req, res) => {
-  const { filter, limit = 20, offset = 0 } = req.query;
-  const data = await crossJoinUsersProducts(filter, parseInt(limit), parseInt(offset));
+  const { filter, page = 1, pageSize = 10 } = req.query;
+  const data = await crossJoinUsersProducts(filter, parseInt(page), parseInt(pageSize));
   res.json(data);
 });
 
 // Users above 1000
 app.get('/users-rich', async (req, res) => {
-  const data = await usersAbove1000();
+  const {page = 1, pageSize = 10 } = req.query;
+  const data = await usersAbove1000(parseInt(page), parseInt(pageSize));
   res.json(data);
 });
 
 // Top-selling product per user
 app.get('/users-top-product', async (req, res) => {
-  const data = await topProductPerUser();
+  const {page = 1, pageSize = 10 } = req.query;
+  const data = await topProductPerUser(parseInt(page), parseInt(pageSize));
   res.json(data);
 });
 
@@ -217,9 +364,45 @@ app.get("/orders", async (req, res) => {
 });
 
 // Export CSV
-app.get('/export-users', async (req, res) => {
-  const message = await exportUsersToCSV();
-  res.json({ message });
+app.post("/export", async (req, res) => {
+  try {
+    const { users, products, orders } = req.body;
+
+    // ✅ Validate booleans strictly
+    if (
+      typeof users !== "boolean" ||
+      typeof products !== "boolean" ||
+      typeof orders !== "boolean"
+    ) {
+      return res.status(400).json({
+        error:
+          "Invalid request: users, products, and orders must be boolean values (true/false)"
+      });
+    }
+
+    const tablesToExport = [];
+    if (users) tablesToExport.push("users");
+    if (products) tablesToExport.push("products");
+    if (orders) tablesToExport.push("orders");
+
+    if (tablesToExport.length === 0) {
+      return res
+        .status(400)
+        .json({ error: "No table selected for export (all are false)" });
+    }
+
+    const results = {};
+    for (const table of tablesToExport) {
+      results[table] = await exportTableToCSV(table);
+    }
+
+    res.json({
+      tables_exported: tablesToExport,
+      results
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 
