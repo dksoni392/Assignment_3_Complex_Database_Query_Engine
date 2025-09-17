@@ -195,7 +195,8 @@ app.post('/order', async (req, res) => {
 // Paginate users
 app.get('/users', async (req, res) => {
   const page = parseInt(req.query.page) || 1;
-  const data = await listUsers(page);
+  const pageSize = parseInt(req.query.pageSize) || 5;
+  const data = await listUsers(page,pageSize);
   res.json(data);
 });
 
