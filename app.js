@@ -1,22 +1,26 @@
 // app.js
 const express = require('express');
 const mysql = require('mysql2/promise');
+const dotenv = require("dotenv");
 const fs = require('fs');
 
 const app = express();
 app.use(express.json());
 
+dotenv.config();
+
 // ----------------- MySQL Connection -----------------
 const pool = mysql.createPool({
-  host: 'localhost',
-  user: 'root',
-  password: 'Kota@2022',
-  database: 'assignment3',
+  host: process.env.DB_HOST,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  database: process.env.DB_NAME,
   waitForConnections: true,
-  connectionLimit: 10,
+  connectionLimit: parseInt(process.env.DB_CONNECTION_LIMIT, 10) || 10,
   queueLimit: 0
 });
 
+module.exports = pool;
 // ----------------- Queries / Functions -----------------
 
 // 1️ Cross join with optional filter
